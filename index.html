@@ -306,15 +306,11 @@
   "use strict";
 
   /* ============================================================
-   * 排行榜配置（GitHub Gist 全网共享）
-   * 只改下面两行即可接入你的榜单，改完保存并上线：
-   *   LB_GIST_ID —— 你 Gist 的 ID（网址 api.github.com/gists/<ID> 里的那串）
-   *   LB_TOKEN   —— 你的 GitHub 经典 Token，仅勾选 gist 权限
+   * 排行榜配置（Cloudflare Worker 代理，token 藏在服务端不外露）
+   *   LB_WORKER —— 你的 Worker 地址（形如 xxx.workers.dev）
    * 留空时排行榜默认不显示/不可用（游戏其余功能不受影响）。
    * ============================================================ */
-  const LB_GIST_ID = "99b5f6e6d0b68909b03d5e5cb2b58c49";
-  const LB_TOKEN   = "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";
-  const LB_FILENAME = "scores.json";
+  const LB_WORKER = "https://empty-morning-0969.zyk798737804.workers.dev";
 
   /* ============================================================
    * 照片层级数据 —— 11 级，由小到大合成，最终合成「大红霞」
@@ -739,7 +735,7 @@
   }
 
   /* ---------- 排行榜（GitHub Gist 后端）---------- */
-  function lbReady() { return !!(LB_GIST_ID && LB_TOKEN); }
+  function lbReady() { return !!LB_WORKER; }
   const LB_MAX = 50;
   const LB_SHOW = 20;
   const LB_MAX_SCORE = 30000;
@@ -797,43 +793,31 @@
   async function lbFetch() {
     const now = Date.now();
     if (lbCache.data && now - lbCache.t < 8000) return lbCache.data;
-    const resp = await fetch("https://api.github.com/gists/" + LB_GIST_ID + "?t=" + now, { cache: "no-store" });
+    const resp = await fetch(LB_WORKER + "?t=" + now, { cache: "no-store" });
     if (!resp.ok) throw new Error("HTTP " + resp.status);
     const data = await resp.json();
-    const file = data && data.files && data.files[LB_FILENAME];
-    if (!file) throw new Error("未找到 " + LB_FILENAME);
-    let arr;
-    try { arr = JSON.parse(file.content || "[]"); } catch (e) { throw new Error("数据格式错误"); }
-    if (!Array.isArray(arr)) arr = [];
+    if (data && data.error) throw new Error(data.error);
+    const arr = Array.isArray(data) ? data : [];
     lbCache = { t: now, data: arr };
     return arr;
-  }
-
-  async function lbWrite(arr) {
-    const resp = await fetch("https://api.github.com/gists/" + LB_GIST_ID, {
-      method: "PATCH",
-      headers: {
-        "Accept": "application/vnd.github+json",
-        "Content-Type": "application/json",
-        "Authorization": "token " + LB_TOKEN
-      },
-      body: JSON.stringify({ files: { [LB_FILENAME]: { content: JSON.stringify(arr) } } })
-    });
-    if (!resp.ok) throw new Error("HTTP " + resp.status);
-    lbCache = { t: 0, data: null };
   }
 
   async function lbSubmit(name, score) {
     const id = getPlayerId();
     const entry = { id: id, name: name, score: score, t: Date.now() };
-    let list;
-    try { list = await lbFetch(); }
-    catch (e) { throw new Error("读取排行榜失败，已取消提交"); }
-
-    const top = lbNormalize(list.concat([entry])).slice(0, LB_MAX);
-    try { await lbWrite(top); }
-    catch (e) { throw new Error("写入失败，请检查网络或 Token 是否有效"); }
-    return top;
+    let resp;
+    try {
+      resp = await fetch(LB_WORKER, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entry: entry })
+      });
+    } catch (e) { throw new Error("网络错误，请稍后重试"); }
+    if (!resp.ok) throw new Error("提交失败（HTTP " + resp.status + "）");
+    const data = await resp.json();
+    if (data && data.error) throw new Error("提交失败：" + data.error);
+    lbCache = { t: 0, data: null };
+    return Array.isArray(data) ? data : [];
   }
 
   function renderLeaderboard(list) {
@@ -858,7 +842,7 @@
 
   function openLeaderboard() {
     if (!lbReady()) {
-      lbListEl.innerHTML = '<div class="lb-empty">排行榜尚未配置<br>请在 index.html 顶部填写 LB_GIST_ID 和 LB_TOKEN</div>';
+      lbListEl.innerHTML = '<div class="lb-empty">排行榜尚未配置<br>请在 index.html 顶部填写 LB_WORKER 地址</div>';
       lbModal.classList.remove("hidden");
       return;
     }
